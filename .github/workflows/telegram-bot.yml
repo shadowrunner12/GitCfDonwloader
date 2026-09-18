@@ -1,0 +1,118 @@
+name: Telegram YouTube Downloader
+
+on:
+  repository_dispatch:
+    types: [yt_list_formats, yt_playlist_range, yt_download]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "list or download"
+        required: true
+        default: "download"
+      url:
+        description: "YouTube URL"
+        required: true
+      chat_id:
+        description: "Telegram chat id"
+        required: true
+      format:
+        description: "height (e.g. 720) or audio"
+        required: false
+        default: "720"
+      destination:
+        description: "chat or github"
+        required: false
+        default: "github"
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    services:
+      bgutil-pot:
+        image: brainicism/bgutil-ytdlp-pot-provider
+        ports:
+          - 4416:4416
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect platform
+        id: detect
+        env:
+          VIDEO_URL: ${{ github.event.client_payload.url || github.event.inputs.url }}
+        run: |
+          if [[ -z "$VIDEO_URL" || "$VIDEO_URL" == *"youtube.com"* || "$VIDEO_URL" == *"youtu.be"* ]]; then
+            echo "is_youtube=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_youtube=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - uses: denoland/setup-deno@v2
+        if: steps.detect.outputs.is_youtube == 'true'
+        with:
+          deno-version: v2.x
+
+      - name: Install yt-dlp
+        run: pip install -U -r requirements.txt
+
+      - name: Install YouTube PO token plugin
+        if: steps.detect.outputs.is_youtube == 'true'
+        run: pip install -U bgutil-ytdlp-pot-provider
+
+      - name: Ensure ffmpeg is available
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            sudo apt-get update && sudo apt-get install -y ffmpeg
+          fi
+          ffmpeg -version | head -n1
+          ffprobe -version | head -n1
+
+      - name: Start local Telegram Bot API server (optional, raises chat upload limit to 2GB)
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          if [ -z "$TELEGRAM_API_ID" ] || [ -z "$TELEGRAM_API_HASH" ]; then
+            echo "TELEGRAM_API_ID/TELEGRAM_API_HASH not set — skipping, chat uploads stay capped at 50MB"
+            exit 0
+          fi
+          mkdir -p /tmp/tgapi-storage
+          docker run -d --name tgapi --network host \
+            -v /tmp/tgapi-storage:/tmp/tgapi-storage \
+            heilkit/telegram-bot-api \
+            -d /tmp/tgapi-storage -v 1 --local --api-id="$TELEGRAM_API_ID" --api-hash="$TELEGRAM_API_HASH"
+          for i in $(seq 1 20); do
+            if curl -s http://127.0.0.1:8081/ > /dev/null; then
+              echo "local bot api server is up"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Run bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          YTDLP_COOKIES_B64: ${{ secrets.YTDLP_COOKIES_B64 }}
+          IG_COOKIES_B64: ${{ secrets.IG_COOKIES_B64 }}
+          TWITTER_COOKIES_B64: ${{ secrets.TWITTER_COOKIES_B64 }}
+          SOUNDCLOUD_COOKIES_B64: ${{ secrets.SOUNDCLOUD_COOKIES_B64 }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODE: ${{ (github.event.action == 'yt_list_formats' && 'list') || (github.event.action == 'yt_playlist_range' && 'playlist_range') || (github.event.inputs.mode || 'download') }}
+          VIDEO_URL: ${{ github.event.client_payload.url || github.event.inputs.url }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id || github.event.inputs.chat_id }}
+          FORMAT: ${{ github.event.client_payload.format || github.event.inputs.format || '720' }}
+          DESTINATION: ${{ github.event.client_payload.destination || github.event.inputs.destination || 'github' }}
+          MEDIA_TYPE: ${{ github.event.client_payload.media_type || github.event.inputs.media_type || 'video' }}
+          STATUS_MESSAGE_ID: ${{ github.event.client_payload.status_message_id }}
+          LIST_ID: ${{ github.event.client_payload.list_id }}
+          RANGE_START: ${{ github.event.client_payload.range_start }}
+          RANGE_END: ${{ github.event.client_payload.range_end }}
+          RAW_CALLBACK_DATA: ${{ github.event.client_payload.raw_callback_data }}
+        run: python bot.py
