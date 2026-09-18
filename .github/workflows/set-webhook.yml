@@ -1,0 +1,29 @@
+name: Set Telegram Webhook
+
+on:
+  workflow_dispatch:
+    inputs:
+      worker_url:
+        description: "Cloudflare Worker URL (e.g. https://xxx.workers.dev)"
+        required: true
+      webhook_secret:
+        description: "Same WEBHOOK_SECRET you set in the Cloudflare Worker"
+        required: true
+
+jobs:
+  set-webhook:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call setWebhook
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+            -d "url=${{ inputs.worker_url }}" \
+            -d "secret_token=${{ inputs.webhook_secret }}"
+
+      - name: Check webhook info
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"
